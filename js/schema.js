@@ -1,0 +1,1056 @@
+// schema.js
+// Defines the exact field structure for the 5 monitoring categories,
+// matching the government template files field-for-field.
+
+const BASIC_INFO_FIELDS = [
+  { key: '計畫代碼', label: '計畫代碼', type: 'text', required: true,
+    help: '格式為「英文代碼-四碼流水號」，例如 E-0001；如有延伸編碼請填 E-0001.1（請勿使用舊版三碼格式）' },
+  { key: '書件案號', label: '書件案號', type: 'text',
+    help: '共8碼：前7碼為數字，第8碼為英文大寫（若無可不填）' },
+  // 官方五份辭典都把「書件名稱」「執行現況」列為必填（辭典 3、4），
+  // v4.42 以前程式當成選填，空著匯出也不會有人講一聲。
+  { key: '書件名稱', label: '書件名稱', type: 'text', required: true, help: '請填寫完整書件名稱，勿使用簡易寫法' },
+  // A leading blank, like every other select in this schema. Without it the browser
+  // auto-selected 施工前 for a project that had never set the field, so the screen
+  // showed 施工前 while the export wrote an empty cell.
+  { key: '執行現況', label: '執行現況', type: 'select', required: true,
+    options: ['', '施工前', '施工中', '施工兼營運', '營運中'] },
+  /*
+   * 這三個是**條件式必填**——必不必填要看「執行現況」選了什麼。
+   * 官方在這幾條旁邊標了「變更」，代表 115 年才加嚴的。辭典原文：
+   *   施工日期（5）：「若執行現況為施工中或施工兼營運，請務必填寫」
+   *   竣工日期（6）：「若執行現況為施工兼營運或營運中，需填此欄」
+   *   營運日期（7）：「若執行現況為施工兼營運或營運中，此欄必填」
+   * 所以不能寫 required: true（那會變成永遠必填），改用 requiredWhenStatus。
+   */
+  { key: '施工日期', label: '施工日期', type: 'date',
+    requiredWhenStatus: ['施工中', '施工兼營運'],
+    help: '執行現況為施工中/施工兼營運時請務必填寫' },
+  { key: '竣工日期', label: '竣工日期', type: 'date',
+    requiredWhenStatus: ['施工兼營運', '營運中'],
+    help: '執行現況為施工兼營運/營運中時請填寫' },
+  { key: '營運日期', label: '營運日期', type: 'date',
+    requiredWhenStatus: ['施工兼營運', '營運中'],
+    help: '執行現況為施工兼營運/營運中時請務必填寫' },
+  { key: '備註', label: '備註', type: 'textarea', help: '100字以內' },
+];
+
+// 檢測類別 option lists per category (from 環境監測填寫範本 資料辭典)
+const CATEGORY_TYPE_OPTIONS = {
+  air: ['大氣環境', '固定污染源', '移動污染源', '周界空氣品質', '室內空氣品質', '光污染'],
+  water: ['飲用水', '自來水', '河川', '水庫', '海域海灘', '地下水', '水下噪音-打樁', '水下噪音-風場範圍', '污廢水', '回收水', '雨水'],
+  geo: ['土壤品質', '土砂觀測', '土壤', '底泥品質', '毒化物質', '廢棄物'],
+  noise: ['環境噪音', '道路交通噪音', '營建工程噪音', '公私場所噪音', '航空噪音', '低頻噪音', '振動'],
+};
+
+/*
+ * 一次採樣就是一個位置，所以這三欄永遠是一組動的——手動改一格會連帶同步、
+ * 匯入時把噪音的座標帶給振動也是帶這三欄。
+ *
+ * ⚠️ 放在這裡是刻意的：v4.37 以前它只寫在 app.js 某個函式裡面，
+ * 匯入那一側要用就得再抄一份。同一份清單抄兩遍，遲早有一邊漏掉「座標系統」，
+ * 而漏掉之後畫面上完全看不出來——座標有了、座標系統空白，上傳才被退件。
+ */
+const COORD_FIELDS = ['座標系統', '採樣座標-經度 X', '採樣座標-緯度 Y'];
+
+/*
+ * 噪音 ↔ 振動：哪些欄位「必須各自不同」（v4.37）
+ * ─────────────────────────────────────────────
+ * 預設是**可以同步、會先問**——這樣以後多一個欄位不用再改一次程式。
+ * 下面這些是例外：它們在噪音與振動之間本來就不一樣，同步過去就是填錯。
+ *
+ * 不是憑印象列的，是把使用者的 5 份實際報告讀出來逐欄比對的結果：
+ *
+ *   管制標準      噪音：營建工程／噪音管制法第7條第1項   振動：無
+ *   管制區        噪音：第2類／第3類                   振動：無
+ *     ↑ 這兩個是官方明文規定：振動必須填「無」、噪音不能填「無」。
+ *       115年7月起加強檢核，同步過去等於在退件上面加一個「確定」按鈕。
+ *   監測單位      噪音：16（dB(A)）                   振動：159（dB）
+ *   監測方法      噪音：NIEA P201／P205                振動：NIEA P204
+ *   音源發聲特性   噪音：Leq／Lmax／Leq,LF              振動：Lveq／Lvmax／Lvd(10)／Lvn(10)
+ *   頻率範圍      噪音：20 Hz 至 20kHz／20 Hz 至 200 Hz  振動：空白
+ *   環境音量標準   道路交通噪音專用，振動不適用
+ *   監測時段      噪音有日／晚／夜三段，振動只有日／夜；而且它是每一列自己的屬性
+ *   檢測類別      這就是用來分辨兩者的欄位，另有專屬的同步流程
+ *   監測數值      每一列的測值本來就該不一樣
+ *
+ * 沒列在這裡的（例如備註、以後新增的欄位）一律走「先問再同步」。
+ */
+const NOISE_VIB_DISTINCT_FIELDS = [
+  '管制標準', '管制區', '環境音量標準', '頻率範圍', '音源發聲特性',
+  '檢測類別', '監測時段', '監測數值', '監測單位', '其他監測單位', '監測方法',
+];
+
+/*
+ * 匯入時要從噪音帶給振動的欄位：報告的振動那一半通常整欄留白。
+ * 座標三欄 ＋ 檢測機構（同一次到場、同一個位置、同一家檢測機構做的）。
+ * 日期與時間不在這裡——它們是配對用的鍵，本來就已經一致。
+ */
+const NOISE_VIB_IMPORT_FILL_FIELDS = [...COORD_FIELDS, '檢測機構許可證號', '其他檢測機構名稱'];
+
+/*
+ * 生態的「調查項目」——建議清單，不是嚴格下拉。
+ *
+ * 來源：官方「環境監測填寫範本 115.8.18」的「總分類」工作表，生態污染別共 11 項，
+ * 逐字照抄（v4.36 依此份範本更新；舊版簡報只列 8 項，且第 8 項在同一份簡報裡
+ * 「其他動植物」與「維管束植物」兩種寫法並存——總分類寫的是維管束植物，
+ * 而且根本沒有「其他動植物」這一項）。
+ *
+ * ⚠️ 這裡刻意用 'suggest'（可選也可打）而不是 'select'（只能選）：
+ * 官方生態資料辭典第 18 列寫的是「請輸入文字 30 字以內。項目分類**可以請參考**
+ * 工作表-"總分類"或紅皮書名錄」，而且它自己的填寫示範用了「裸子植物」——
+ * 那不在總分類這 11 項裡面。鎖成下拉會讓合法的值打不進去。
+ */
+const ECO_SURVEY_ITEMS = [
+  '魚類', '鳥類', '爬蟲類', '兩棲類', '蝶類', '哺乳類', '昆蟲類',
+  '淡水魚類', '陸域爬行類', '陸域哺乳類', '維管束植物',
+];
+
+// 比較關係 is documented as ">, <, ND" only, but real completed filings also use
+// free-text markers like "未檢測" (equipment failure) etc., so this is a text field
+// with suggestions rather than a strict enum.
+// 辭典（水質 24／空品 26／地質 23）原文：「比較關係：含 ＞、＜、ND，共3種」。
+// ⚠️「未檢測」以前也列在建議裡，但官方根本沒有這個值——手動編輯時挑到它，
+// 就把一個官方不存在的值寫進申報欄位。正確做法是**數值與比較關係都留空、
+// 把「未檢測」寫進備註**（辭典 30），匯入那條路徑本來就是這樣做的
+// （見 parseValueCell），只有這個下拉建議跟它不一致。
+const COMPARE_SUGGESTIONS = ['>', '<', 'ND'];
+
+const CATEGORIES = {
+  air: {
+    key: 'air',
+    locationField: '採樣地點',
+    itemField: '檢測項目',
+    methodField: '檢測方法',
+    unitField: '檢測濃度/質量單位',
+    label: '空氣品質',
+    sourceFile: '空氣品質監測填寫.xlsx',
+    dataSheetName: '空品檢測項目',
+    basicSheetName: '監測點基本資料',
+    fields: [
+      { key: '日期(起)', label: '日期(起)', type: 'date', required: true },
+      { key: '時間(起)', required: true, label: '時間(起)', type: 'time' },
+      { key: '日期(迄)', required: true, label: '日期(迄)', type: 'date' },
+      { key: '時間(迄)', required: true, label: '時間(迄)', type: 'time' },
+      { key: '採樣地點', required: true, label: '採樣地點', type: 'text' },
+      { key: '座標系統', required: true, label: '座標系統', type: 'select', options: ['', '2', '3'],
+        optionLabels: { '2': '2：WGS84（全球座標）', '3': '3：TWD97-TM2（投影座標系）' },
+        help: '2：WGS84（全球座標，例如經度 120.681，緯度 24.147）／3：TWD97-TM2（投影座標系，例如 X=193150, Y=2670900）' },
+      { key: '採樣座標-經度 X', required: true, label: '採樣座標-經度 X', type: 'number' },
+      { key: '採樣座標-緯度 Y', required: true, label: '採樣座標-緯度 Y', type: 'number' },
+      { key: '場所編號', label: '場所編號', type: 'text' },
+      { key: '採樣地點高度(公尺)', label: '採樣地點高度(公尺)', type: 'number' },
+      { key: '污染物採樣高度(公尺)', label: '污染物採樣高度(公尺)', type: 'number' },
+      { key: '管制編號', label: '管制編號', type: 'text' },
+      { key: '煙道編號', label: '煙道編號', type: 'text' },
+      { key: '檢測類別', label: '檢測類別', type: 'select', required: true, options: ['', ...CATEGORY_TYPE_OPTIONS.air] },
+      { key: '檢測項目', required: true, label: '檢測項目', type: 'text' },
+      { key: '檢測濃度/質量單位', requiredUnlessNote: true, label: '檢測濃度/質量單位', type: 'unitcode' },
+      { key: '其他檢測濃度/質量單位', label: '其他檢測濃度/質量單位', type: 'text' },
+      { key: '比較關係', label: '比較關係', type: 'suggest', options: COMPARE_SUGGESTIONS },
+      { key: '檢測數值', requiredUnlessNote: true, label: '檢測數值', type: 'number' },
+      { key: '檢測極限', label: '檢測極限', type: 'number' },
+      { key: '檢測方法', requiredUnlessNote: true, label: '檢測方法', type: 'text' },
+      { key: '檢測機構許可證號', label: '檢測機構許可證號', type: 'agencycode', required: true },
+      { key: '其他檢測機構名稱', label: '其他檢測機構名稱', type: 'text' },
+      { key: '備註', label: '備註', type: 'textarea' },
+    ],
+  },
+  water: {
+    key: 'water',
+    locationField: '採樣地點',
+    itemField: '檢測項目',
+    methodField: '檢測方法',
+    unitField: '檢測濃度/質量單位',
+    label: '水質',
+    sourceFile: '水質檢測資料填寫.xlsx',
+    dataSheetName: '水質檢測項目',
+    basicSheetName: '監測點基本資料',
+    fields: [
+      { key: '日期(起)', label: '日期(起)', type: 'date', required: true },
+      { key: '時間(起)', required: true, label: '時間(起)', type: 'time' },
+      { key: '日期(迄)', required: true, label: '日期(迄)', type: 'date' },
+      { key: '時間(迄)', required: true, label: '時間(迄)', type: 'time' },
+      { key: '採樣地點', required: true, label: '採樣地點', type: 'text' },
+      { key: '座標系統', required: true, label: '座標系統', type: 'select', options: ['', '2', '3'],
+        optionLabels: { '2': '2：WGS84（全球座標）', '3': '3：TWD97-TM2（投影座標系）' },
+        help: '2：WGS84（全球座標，例如經度 120.681，緯度 24.147）／3：TWD97-TM2（投影座標系，例如 X=193150, Y=2670900）' },
+      { key: '採樣座標-經度 X', required: true, label: '採樣座標-經度 X', type: 'number' },
+      { key: '採樣座標-緯度 Y', required: true, label: '採樣座標-緯度 Y', type: 'number' },
+      { key: '採樣深度(公尺)', label: '採樣深度(公尺)', type: 'number' },
+      { key: '採樣水深(公尺)', label: '採樣水深(公尺)', type: 'number' },
+      { key: '管制編號', label: '管制編號', type: 'text' },
+      { key: '檢測類別', label: '檢測類別', type: 'select', required: true, options: ['', ...CATEGORY_TYPE_OPTIONS.water] },
+      { key: '檢測項目', required: true, label: '檢測項目', type: 'text' },
+      { key: '檢測濃度/質量單位', requiredUnlessNote: true, label: '檢測濃度/質量單位', type: 'unitcode' },
+      { key: '其他檢測濃度/質量單位', label: '其他檢測濃度/質量單位', type: 'text' },
+      { key: '比較關係', label: '比較關係', type: 'suggest', options: COMPARE_SUGGESTIONS },
+      { key: '檢測數值', requiredUnlessNote: true, label: '檢測數值', type: 'number' },
+      { key: '檢測極限', label: '檢測極限', type: 'number' },
+      { key: '檢測方法', requiredUnlessNote: true, label: '檢測方法', type: 'text' },
+      { key: '檢測機構許可證號', label: '檢測機構許可證號', type: 'agencycode', required: true },
+      { key: '其他檢測機構名稱', label: '其他檢測機構名稱', type: 'text' },
+      { key: '備註', label: '備註', type: 'textarea' },
+    ],
+  },
+  geo: {
+    key: 'geo',
+    locationField: '採樣地點',
+    itemField: '檢測項目',
+    methodField: '檢測方法',
+    unitField: '檢測濃度/質量單位',
+    label: '地質',
+    sourceFile: '地質檢測資料填寫.xlsx',
+    dataSheetName: '地質檢測項目',
+    basicSheetName: '監測點基本資料',
+    fields: [
+      { key: '日期(起)', label: '日期(起)', type: 'date', required: true },
+      { key: '時間(起)', required: true, label: '時間(起)', type: 'time' },
+      { key: '日期(迄)', required: true, label: '日期(迄)', type: 'date' },
+      { key: '時間(迄)', required: true, label: '時間(迄)', type: 'time' },
+      { key: '採樣地點', required: true, label: '採樣地點', type: 'text' },
+      { key: '座標系統', required: true, label: '座標系統', type: 'select', options: ['', '2', '3'],
+        optionLabels: { '2': '2：WGS84（全球座標）', '3': '3：TWD97-TM2（投影座標系）' },
+        help: '2：WGS84（全球座標，例如經度 120.681，緯度 24.147）／3：TWD97-TM2（投影座標系，例如 X=193150, Y=2670900）' },
+      { key: '採樣座標-經度 X', required: true, label: '採樣座標-經度 X', type: 'number' },
+      { key: '採樣座標-緯度 Y', required: true, label: '採樣座標-緯度 Y', type: 'number' },
+      { key: '採樣深度(公尺)', label: '採樣深度(公尺)', type: 'number' },
+      { key: '管制編號', label: '管制編號', type: 'text' },
+      { key: '檢測類別', label: '檢測類別', type: 'select', required: true, options: ['', ...CATEGORY_TYPE_OPTIONS.geo] },
+      { key: '檢測項目', required: true, label: '檢測項目', type: 'text' },
+      { key: '檢測濃度/質量單位', requiredUnlessNote: true, label: '檢測濃度/質量單位', type: 'unitcode' },
+      { key: '其他檢測濃度/質量單位', label: '其他檢測濃度/質量單位', type: 'text' },
+      { key: '比較關係', label: '比較關係', type: 'suggest', options: COMPARE_SUGGESTIONS },
+      { key: '檢測數值', requiredUnlessNote: true, label: '檢測數值', type: 'number' },
+      { key: '檢測極限', label: '檢測極限', type: 'number' },
+      { key: '檢測方法', requiredUnlessNote: true, label: '檢測方法', type: 'text' },
+      { key: '檢測機構許可證號', label: '檢測機構許可證號', type: 'agencycode', required: true },
+      { key: '其他檢測機構名稱', label: '其他檢測機構名稱', type: 'text' },
+      { key: '備註', label: '備註', type: 'textarea' },
+    ],
+  },
+  noise: {
+    key: 'noise',
+    locationField: '監測地點',
+    itemField: '音源發聲特性',
+    methodField: '監測方法',
+    unitField: '監測單位',
+    label: '噪音',
+    sourceFile: '噪音監測資料填寫.xlsx',
+    dataSheetName: '噪音檢測項目',
+    basicSheetName: '監測點基本資料',
+    fields: [
+      { key: '日期(起)', label: '日期(起)', type: 'date', required: true },
+      { key: '時間(起)', required: true, label: '時間(起)', type: 'time' },
+      { key: '日期(迄)', required: true, label: '日期(迄)', type: 'date' },
+      { key: '時間(迄)', required: true, label: '時間(迄)', type: 'time' },
+      { key: '監測地點', required: true, label: '監測地點', type: 'text' },
+      { key: '座標系統', required: true, label: '座標系統', type: 'select', options: ['', '2', '3'],
+        optionLabels: { '2': '2：WGS84（全球座標）', '3': '3：TWD97-TM2（投影座標系）' },
+        help: '2：WGS84（全球座標，例如經度 120.681，緯度 24.147）／3：TWD97-TM2（投影座標系，例如 X=193150, Y=2670900）' },
+      { key: '採樣座標-經度 X', required: true, label: '採樣座標-經度 X', type: 'number' },
+      { key: '採樣座標-緯度 Y', required: true, label: '採樣座標-緯度 Y', type: 'number' },
+      { key: '管制標準', required: true, label: '管制標準', type: 'select', options: ['', '工廠（場）噪音', '營建工程', '娛樂場所/營業場所', '擴音設施', '其他-1', '其他-2', '噪音管制法第7條第1項', '噪音管制法第15條第3項', '噪音管制法第14條第2項', '無'] },
+      { key: '管制區', required: true, label: '管制區', type: 'select', options: ['', '第1類', '第2類', '第3類', '第4類', '無'] },
+      { key: '環境音量標準', label: '環境音量標準', type: 'select', options: ['', '0', '1', '2'],
+        optionLabels: { '0': '0-不適用', '1': '1-緊鄰未滿八公尺之道路', '2': '2-緊鄰八公尺以上之道路' } },
+      { key: '頻率範圍', label: '頻率範圍', type: 'select', options: ['', '20 Hz 至 200 Hz', '20 Hz 至 20kHz'] },
+      { key: '音源發聲特性', required: true, label: '音源發聲特性', type: 'select', options: ['', '最大音量(Lmax)', '均能音量(Leq)', '均能音量(Leq,LF)', '最大振動位準(Lvmax)', '事件振動位準(Lveq)', 'Lvd(10)', 'Lvn(10)'] },
+      { key: '檢測類別', label: '檢測類別', type: 'select', required: true, options: ['', ...CATEGORY_TYPE_OPTIONS.noise] },
+      { key: '監測時段', required: true, label: '監測時段', type: 'select', options: ['', '日間', '晚間', '夜間', '全天'] },
+      { key: '監測數值', requiredUnlessNote: true, label: '監測數值', type: 'number' },
+      { key: '監測單位', requiredUnlessNote: true, label: '監測單位', type: 'unitcode' },
+      { key: '其他監測單位', label: '其他監測單位', type: 'text' },
+      { key: '監測方法', requiredUnlessNote: true, label: '監測方法', type: 'text' },
+      { key: '檢測機構許可證號', label: '檢測機構許可證號', type: 'agencycode', required: true },
+      { key: '其他檢測機構名稱', label: '其他檢測機構名稱', type: 'text' },
+      { key: '備註', label: '備註', type: 'textarea' },
+    ],
+  },
+  eco: {
+    key: 'eco',
+    locationField: '調查地點',
+    itemField: '調查項目',
+    methodField: null,
+    unitField: null,
+    label: '生態',
+    sourceFile: '生態調查資料填寫.xlsx',
+    dataSheetName: '生態檢測項目',
+    basicSheetName: '監測點基本資料',
+    fields: [
+      { key: '日期(起)', label: '日期(起)', type: 'date', required: true },
+      { key: '時間(起)', required: true, label: '時間(起)', type: 'time' },
+      { key: '日期(迄)', required: true, label: '日期(迄)', type: 'date' },
+      { key: '時間(迄)', required: true, label: '時間(迄)', type: 'time' },
+      { key: '調查地點', required: true, label: '調查地點', type: 'text' },
+      { key: '座標系統', required: true, label: '座標系統', type: 'select', options: ['', '2', '3'],
+        optionLabels: { '2': '2：WGS84（全球座標）', '3': '3：TWD97-TM2（投影座標系）' },
+        help: '2：WGS84（全球座標，例如經度 120.681，緯度 24.147）／3：TWD97-TM2（投影座標系，例如 X=193150, Y=2670900）' },
+      { key: '採樣座標-經度 X', required: true, label: '採樣座標-經度 X', type: 'number' },
+      { key: '採樣座標-緯度 Y', required: true, label: '採樣座標-緯度 Y', type: 'number' },
+      { key: '調查項目', required: true, label: '調查項目', type: 'suggest', options: ECO_SURVEY_ITEMS, maxLength: 30,
+        help: '可從清單選，也可以自己輸入（官方寫「可以參考」總分類或紅皮書名錄，範本自己的示範就用了清單外的「裸子植物」）。30 字以內。' },
+      { key: '調查頻率', required: true, label: '調查頻率', type: 'text' },
+      { key: '環境現況描述', required: true, label: '環境現況描述', type: 'textarea' },
+      { key: '學名', required: true, label: '學名', type: 'text' },
+      { key: '中文名', required: true, label: '中文名', type: 'text' },
+      { key: '數量', required: true, label: '數量', type: 'text' },
+      /*
+       * 「單位」——v4.36 補上。官方 115.8.18 的空白表單「生態檢測項目」共 21 欄，
+       * 這一欄夾在「數量」與「特有性」之間；舊版少了它，匯出只有 20 欄，
+       * 欄位對不上就是整份退件。**位置不可以移動**，環境部是按欄序讀的。
+       *
+       * ⚠️ 這是自由文字，不是單位代碼。官方辭典第 23 列：「選填。若不可數，
+       * 可填寫單位，例如：批、群；或覆蓋度：%」——填的是「群」「%」這種字，
+       * 不是 1~161 的代碼。所以 eco 的 unitField 仍然維持 null。
+       */
+      { key: '單位', label: '單位', type: 'text',
+        help: '選填。若不可數可填單位（例如：批、群），或覆蓋度（%）。這一欄填文字，不是單位代碼。' },
+      // v4.59（#98，使用者 11/4）：辭典 24 只寫「特有種、特有亞種」、沒有要擋；填「外來」官方不會阻擋 → 也接受「外來種」
+      { key: '特有性', label: '特有性', type: 'select', options: ['', '特有種', '特有亞種', '外來種'] },
+      { key: '保育分類', label: '保育分類', type: 'select', options: ['', 'I', 'II', 'III'] },
+      { key: '調查方法描述', label: '調查方法描述', type: 'textarea', required: true },
+      { key: '檢測機構許可證號', label: '檢測機構許可證號', type: 'agencycode', required: true },
+      { key: '其他檢測機構名稱', label: '其他檢測機構名稱', type: 'text' },
+      { key: '備註', label: '備註', type: 'textarea' },
+    ],
+  },
+};
+
+const CATEGORY_ORDER = ['air', 'water', 'geo', 'noise', 'eco'];
+
+// ── 振動的音源發聲特性：日間 Lvd(10)、夜間 Lvn(10) ──────────────────────────
+//
+// 官方「噪音資料辭典」第 21 列把振動的音源發聲特性列為四種：
+// 最大振動位準(Lvmax)、事件振動位準(Lveq)、Lvd(10)、Lvn(10)。
+// 其中 Lvd 的 d 是 day、Lvn 的 n 是 night——環境振動的 24 小時報告會分別算出
+// 「Lv日(Lv10)」與「Lv夜(Lv10)」兩個值（報告上通常還會註明日間 6~20 時、
+// 夜間 20~翌日 6 時），日間那一筆要填 Lvd(10)，夜間那一筆要填 Lvn(10)。
+//
+// v4.29 以前解析器對日、夜兩筆都填 Lvd(10)，夜間那一筆是錯的。
+//
+// ⚠️ 只適用於「環境振動 24 小時報告的 Lv10 彙整值」。
+//    ・營建工程振動（BV）用的是事件振動位準(Lveq)／最大振動位準(Lvmax)，
+//      那兩個沒有日夜之分，不可套用本規則。
+//    ・晚間、全天沒有對應的官方代碼（振動只分日、夜兩個時段），一律不改，
+//      維持使用者自己選的值。
+const VIB_LV10_DAY = 'Lvd(10)';
+const VIB_LV10_NIGHT = 'Lvn(10)';
+
+/** 依監測時段決定 Lv10 彙整值的音源發聲特性；只認得日間與夜間，其餘回傳 null。 */
+function vibLv10ItemFor(timeSegment) {
+  if (timeSegment === '日間') return VIB_LV10_DAY;
+  if (timeSegment === '夜間') return VIB_LV10_NIGHT;
+  /*
+   * 「晚間」是**噪音**的時段分法（日／晚／夜三段）。振動參考日本振動規制法，
+   * 只分日間與夜間兩段——官方的音源發聲特性也只有 Lvd(10)、Lvn(10) 兩個代碼，
+   * 沒有晚間版本。
+   *
+   * 而報告上的「測定時間」是用噪音那套三段規則判的，所以營建工程若在
+   * 18:00~21:59 之間量測，振動列會拿到「晚間」這個對振動不存在的時段。
+   * 舊版在這裡回傳 null，呼叫端就整列跳過——Lv10 **靜靜不見**，畫面上沒有提示。
+   *
+   * 依使用者確認：**振動的晚間併入夜間**（日本振動規制法多數地區日間是
+   * 08:00~19:00，19:00 之後轉夜間，比 22:00 才轉更接近實務）。
+   */
+  if (timeSegment === '晚間') return VIB_LV10_NIGHT;
+  return null;
+}
+
+/**
+ * 把「夜間 + Lvd(10)」這個**錯誤組合**正規化成 Lvn(10)，其餘一律原樣回傳。
+ *
+ * 這支專門給「比對用的識別碼」使用（跨季測站記憶、缺少測項比對、重複列偵測），
+ * 讓 v4.29 以前存下來的舊資料和本版新匯入的資料被視為同一個測項。少了它會發生：
+ *   ・舊記憶裡的「Lvd(10)::夜間」在新匯入時看起來像「這個測項不見了」，
+ *     而缺少測項的建議是**預設打勾**的，使用者不取消就會多出一筆空白列；
+ *   ・重新匯入同一份報告時，新的 Lvn(10) 找不到對應的舊列，會被當成全新資料附加，
+ *     同一天同測站就同時存在 Lvd(10) 與 Lvn(10) 兩筆夜間振動。
+ * 它只動「夜間的 Lvd(10)」這一個組合——依定義那就是錯的，所以不會誤傷任何正確資料。
+ */
+function canonicalVibItemName(itemName, timeSegment) {
+  // 走 vibLv10ItemFor 而不是自己比對「夜間」，這樣「晚間也算夜間」那條規則
+  // 只需要維護在一個地方——否則跨季比對會把同一個測項當成兩個。
+  if (itemName !== VIB_LV10_DAY) return itemName;
+  return vibLv10ItemFor(timeSegment) === VIB_LV10_NIGHT ? VIB_LV10_NIGHT : itemName;
+}
+
+// ── 小數位數設定（使用者可調） ──────────────────────────────────────────────
+//
+// 起因：官方辭典的規定會改。v4.33 以前是把「哪些欄位要兩位小數」寫死在程式裡，
+// 規定一改就得改程式、重新發布。現在改成**使用者自己在畫面上設定**，
+// 程式只提供「出廠預設值 ＝ 目前官方辭典的規定」。
+//
+// **出廠預設只有一項：噪音的「監測數值」補零到 2 位。其餘一律「不處理」（原樣）。**
+//
+// 為什麼不把辭典寫到的六個欄位全部設成預設：使用者只親自確認過噪音那一條。
+// 程式替使用者決定申報數值要寫幾位，等於替他做了一個他沒同意的決定——
+// 而數值的位數本身就是資訊（補成兩位＝宣稱實驗室量到小數第二位）。
+// 辭典寫了什麼仍然完整保留在 OFFICIAL_DECIMAL_RULES，面板上逐欄顯示，
+// 並提供一鍵「套用官方辭典建議」，要不要採用由使用者自己按。
+//
+// 我把 115 年版五份辭典的說明欄整份讀出來比對過，寫了小數位數的只有這六個：
+//   噪音   監測數值              「請填數值，小數點2位數」  ← 出廠預設就是它
+//   空氣   採樣地點高度(公尺)     「請填小數點後兩位。」
+//   空氣   污染物採樣高度(公尺)   「請填小數點後兩位。」
+//   水質   採樣深度(公尺)         「請填小數點後兩位。」
+//   水質   採樣水深(公尺)         「請填小數點後兩位。」
+//   地質   採樣深度(公尺)         「請填小數點後兩位。」
+//
+// 空氣／水質／地質的「檢測數值」辭典**沒有**規定，所以預設不處理。
+// 硬套會製造假精度：空品報告 274 個值裡有 138 個原本只有 0～1 位小數。
+//
+// ⚠️ 兩種模式的差別很重要：
+//   補零（pad）    ：只加尾零，**絕不減少位數**。0.125 在兩位設定下仍是 0.125。
+//                    改的只是寫法，數字完全沒動。
+//   四捨五入（round）：真的會減少位數。0.125 在兩位設定下變成 0.13。
+//                    **但只影響畫面顯示與匯出的檔案，存起來的永遠是原始值**，
+//                    所以設定改回去、或改成別的位數，隨時都能還原。
+const DECIMAL_MODES = { off: '不處理', pad: '補零', round: '四捨五入' };
+const DECIMAL_SETTINGS_KEY = 'envapp_decimal_settings_v1';
+const DECIMAL_MAX_DIGITS = 6;
+
+/** 115 年版官方辭典寫了小數位數的欄位。**只用來在面板上顯示建議**，不自動套用。 */
+const OFFICIAL_DECIMAL_RULES = {
+  'noise|監測數值': { mode: 'pad', digits: 2 },
+  'air|採樣地點高度(公尺)': { mode: 'pad', digits: 2 },
+  'air|污染物採樣高度(公尺)': { mode: 'pad', digits: 2 },
+  'water|採樣深度(公尺)': { mode: 'pad', digits: 2 },
+  'water|採樣水深(公尺)': { mode: 'pad', digits: 2 },
+  'geo|採樣深度(公尺)': { mode: 'pad', digits: 2 },
+};
+
+/** 出廠預設。只有噪音的監測數值，其餘欄位一律不處理（原樣）。 */
+const DEFAULT_DECIMAL_SETTINGS = {
+  'noise|監測數值': { mode: 'pad', digits: 2 },
+};
+
+/*
+ * 設定面板要列出哪些欄位——**只列會填數字的欄位**。
+ * 全部欄位都列的話一個類別就二十幾列，五個類別加起來根本找不到要改的那一個。
+ * 日期、時間、地點、代碼那些欄位設小數位數沒有意義。
+ */
+const DECIMAL_CONFIGURABLE_FIELDS = {
+  air: ['檢測數值', '檢測極限', '採樣地點高度(公尺)', '污染物採樣高度(公尺)'],
+  water: ['檢測數值', '檢測極限', '採樣深度(公尺)', '採樣水深(公尺)'],
+  geo: ['檢測數值', '檢測極限', '採樣深度(公尺)'],
+  noise: ['監測數值'],
+  // 生態不列：它的「數量」是隻數／株數，本來就是整數，沒有小數位數的問題。
+  eco: [],
+};
+
+const DECIMAL_OFF = { mode: 'off', digits: 2 };
+
+function decimalSettingKey(catKey, fieldKey) { return `${catKey}|${fieldKey}`; }
+
+/** 讀出整份設定（含出廠預設）。壞掉的內容一律忽略，不讓它把畫面弄爆。 */
+/** v4.46（#34）：每個計畫各一份。沒指定計畫就用目前開著的計畫。 */
+function decimalSettingsStorageKey(projectId) {
+  const pid = projectId || (typeof state !== 'undefined' && state && state.currentProjectId) || '';
+  return pid ? `${DECIMAL_SETTINGS_KEY}_${pid}` : DECIMAL_SETTINGS_KEY;
+}
+
+function readDecimalSettings(projectId) {
+  let stored = {};
+  try {
+    const raw = localStorage.getItem(decimalSettingsStorageKey(projectId));
+    if (raw) stored = JSON.parse(raw) || {};
+  } catch { stored = {}; }
+  const out = {};
+  for (const [key, rule] of Object.entries({ ...DEFAULT_DECIMAL_SETTINGS, ...stored })) {
+    if (!rule || typeof rule !== 'object') continue;
+    const mode = Object.prototype.hasOwnProperty.call(DECIMAL_MODES, rule.mode) ? rule.mode : 'off';
+    let digits = Number(rule.digits);
+    if (!Number.isInteger(digits) || digits < 0 || digits > DECIMAL_MAX_DIGITS) digits = 2;
+    out[key] = { mode, digits };
+  }
+  return out;
+}
+
+function writeDecimalSettings(settings, projectId) {
+  localStorage.setItem(decimalSettingsStorageKey(projectId), JSON.stringify(settings));
+}
+
+/** 這個類別的這個欄位，目前要怎麼呈現小數。沒設定過就是「不處理」。 */
+function decimalRuleFor(catKey, fieldKey, settings) {
+  const all = settings || readDecimalSettings();
+  return all[decimalSettingKey(catKey, fieldKey)] || DECIMAL_OFF;
+}
+
+/**
+ * 依規則把一個值格式化。
+ *
+ * ⚠️ 非數值（空白、ND、<0.5、未檢測、科學記號…）一律原樣保留，兩種模式都一樣。
+ * ⚠️ pad 只會**補零**，絕對不會減少位數——這一點是刻意的。
+ *    早期版本寫成 Number(v).toFixed(2)，會把 67.235 變成 67.23、0.0006 變成 0.00，
+ *    等於把實驗室印出來的位數砍掉。要減少位數請明確選「四捨五入」。
+ */
+function formatDecimal(v, rule) {
+  const s = String(v ?? '').trim();
+  if (s === '' || !rule || rule.mode === 'off') return s;
+  const m = s.match(/^([+-]?)(\d*)(?:\.(\d*))?$/);
+  if (!m || (m[2] === '' && (m[3] || '') === '')) return s;
+  const digits = rule.digits;
+  if (rule.mode === 'round') {
+    const n = Number(s);
+    return Number.isFinite(n) ? n.toFixed(digits) : s;
+  }
+  const sign = m[1] === '-' ? '-' : '';
+  const intPart = m[2] === '' ? '0' : m[2];
+  const decPart = m[3] || '';
+  if (decPart.length >= digits) return digits === 0 && decPart === '' ? `${sign}${intPart}` : `${sign}${intPart}${decPart ? '.' + decPart : ''}`;
+  return `${sign}${intPart}.${decPart.padEnd(digits, '0')}`;
+}
+
+/** 給畫面／匯出用的一行式：查規則 ＋ 套用。 */
+function formatFieldValue(catKey, fieldKey, value, settings) {
+  return formatDecimal(value, decimalRuleFor(catKey, fieldKey, settings));
+}
+
+/** 兩個欄位值是不是「同一個數字、只是寫法不同」（39.2 與 39.20、0.3 與 0.30）。 */
+function sameNumericValue(a, b) {
+  const na = String(a ?? '').trim(), nb = String(b ?? '').trim();
+  if (na === nb) return true;
+  if (na === '' || nb === '') return false;
+  const plain = /^[+-]?(\d+(\.\d+)?|\.\d+)$/;
+  if (!plain.test(na) || !plain.test(nb)) return false;
+  return Number(na) === Number(nb);
+}
+
+/**
+ * 「未知格式自動偵測」這條備援路徑抓到的是報告上的**原字**，例如 Lv日(Lv10)。
+ * 那不是合法的音源發聲特性（官方只認四種代碼），而且該路徑不會填監測時段，
+ * 交出去的兩個欄位都是錯的。這裡把原字翻成官方代碼並補上時段。
+ *
+ * 只認這四種明確寫著日／夜的振動標示，其餘（Lv5、Lv50、Leq…）一律不動，
+ * 讓使用者在畫面上自己判斷——猜錯比留白更難發現。
+ */
+const VIB_RAW_LABEL_MAP = {
+  'Lv日(Lv10)': { item: VIB_LV10_DAY, timeSegment: '日間' },
+  'Lv夜(Lv10)': { item: VIB_LV10_NIGHT, timeSegment: '夜間' },
+  'Lv日(Lveq)': { item: '事件振動位準(Lveq)', timeSegment: '日間' },
+  'Lv夜(Lveq)': { item: '事件振動位準(Lveq)', timeSegment: '夜間' },
+};
+
+function normalizeVibRawLabel(rawItemName) {
+  // 報告上半形、全形括號都有人用，順便把結尾的等號吃掉（「Lv日(Lv10)=」）。
+  const key = String(rawItemName ?? '')
+    .replace(/\s+/g, '')
+    .replace(/[（]/g, '(').replace(/[）]/g, ')')
+    .replace(/[=＝]+$/, '');
+  return VIB_RAW_LABEL_MAP[key] || null;
+}
+
+// ── 必填欄位檢查（依 115 年版官方資料辭典）────────────────────────────────
+//
+// 上面每個欄位的 required / requiredUnlessNote 是照「環境監測填寫範本」各類別
+// 資料辭典的「是否必填」欄逐項對出來的：
+//   ・required            → 辭典寫「必填」
+//   ・requiredUnlessNote  → 辭典寫「必/選填」，說明是
+//                           「若因特殊情況無法檢測，請填寫備註，且可以不用填此欄」
+//
+// 另外兩條條件式規則，辭典也寫得很明確：
+//   ・單位代碼填 160（其他）時，「其他…單位」變成必填
+//   � 檢測機構許可證號填 AA 時，「其他檢測機構名稱」變成必填
+//
+// ⚠️ 114 年以前的舊格式有些欄位當時不是必填。這裡一律以**今年的辭典為準**，
+//    但只是「提醒」，不會擋住匯入，也不會擋住匯出——使用者可以自己判斷。
+
+/** 這一列少了哪些必填欄位？回傳 [{ key, label, why }]，沒有就是空陣列。 */
+/*
+ * 噪音／振動的連動規則檢查（v4.42）
+ * ──────────────────────────────────
+ * 官方規定（115 年操作說明 p.19，並自 115 年 7 月起加強檢核）：
+ *   ・檢測類別＝振動 → 管制標準、管制區**必須**填「無」
+ *   ・檢測類別＝噪音 → 管制標準、管制區**不能**填「無」
+ *
+ * 到 v4.41 為止，程式只做到「改的時候不讓你弄錯」——表格編輯、同步、批次修改
+ * 三條路徑都擋住了。但**已經填錯的資料仍然沒有人告訴你**：
+ * 別家公司交來的檔案、上一季匯入的舊資料、報告本身就填錯的，
+ * 全部安安靜靜地躺在表格裡，一路送到環境部才被退件。
+ * 這個函式補的就是「事後也看得出來」。
+ *
+ * ⚠️ 空白不在這裡處理。「管制標準」「管制區」本來就是必填欄位，
+ * 空白由 missingRequiredFields() 負責——同一件事不要兩個地方各講一次，
+ * 那只會讓真正該修的被淹沒。
+ * ⚠️ 檢測類別本身空白時不判斷：連是噪音還是振動都不知道，猜就是亂報。
+ */
+const NOISE_VIB_LINKED_FIELDS = ['管制標準', '管制區'];
+function noiseVibRuleViolations(row, cat) {
+  if (!cat || cat.key !== 'noise') return [];
+  const category = String(row['檢測類別'] ?? '').trim();
+  if (category === '') return [];
+  const isVib = category === '振動';
+  const out = [];
+  NOISE_VIB_LINKED_FIELDS.forEach((key) => {
+    const v = String(row[key] ?? '').trim();
+    if (v === '') return;
+    if (isVib && v !== '無') {
+      out.push({ key, label: key, value: v,
+        why: `檢測類別是「振動」時，「${key}」必須填「無」（目前是「${v}」）` });
+    } else if (!isVib && v === '無') {
+      out.push({ key, label: key, value: v,
+        why: `檢測類別是「${category}」時，「${key}」不能填「無」` });
+    }
+  });
+  return out;
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────
+ * 官方辭典寫得出來、而且驗得了的「格式」規則（v4.43）
+ * ─────────────────────────────────────────────────────────────
+ *
+ * 為什麼要有這一組：生態那一類的資料常常是別家公司做完交過來的，
+ * 匯入的時候**照樣讓它進來**（擋在門口只會逼人去改原始檔），
+ * 但進來之後要有人指著說「這幾格不符合官方要求」。
+ *
+ * 回傳的形狀和 noiseVibRuleViolations 一樣：[{key,label,value,why}]，
+ * 所以表格紅框、滑鼠提示、匯出前清點三條路都直接沿用，不必另外接。
+ *
+ * ⚠️ 只驗官方白紙黑字寫的，沒寫的不猜。每一條下面都附辭典原文。
+ * ⚠️ 而且每一條都拿使用者**已經送出去、環境部收下的**六份完成版實測過，
+ *    零誤報才留下來——會對正確資料亂叫的檢查，比沒有檢查更糟。
+ */
+
+/** 算字數要用碼點，不是 length——一個中文字在 JS 裡本來就是 1，但 emoji 之類是 2。 */
+function charLen(v) { return [...String(v ?? '').trim()].length; }
+
+/**
+ * 官方辭典寫明的字數上限，逐類逐欄。數字全部照抄辭典原文，沒寫的不猜。
+ *
+ * 「備註」五類都是 100 字（各辭典第 8 列，監測點基本資料那一段），
+ * 檢測項目那一段的備註沒有另外寫上限，沿用同一個數字。
+ */
+const MAX_CHARS = {
+  air: {
+    '備註': 100,       // 辭典 8：「100字以內」
+    '檢測項目': 100,   // 辭典 23：「100字以內」
+    '煙道編號': 20,    // 辭典 21：「20字以內」
+    '檢測方法': 50,    // 辭典 29：「50字以內」
+  },
+  water: {
+    '備註': 100,       // 辭典 8
+    '檢測項目': 100,   // 辭典 21
+    '檢測方法': 50,    // 辭典 27
+  },
+  geo: {
+    '備註': 100,       // 辭典 8
+    '檢測項目': 100,   // 辭典 20
+    '檢測方法': 50,    // 辭典 26
+  },
+  noise: {
+    '備註': 100,       // 辭典 8
+    '監測方法': 100,   // 辭典 27：「100字以內」
+  },
+  eco: {
+    '備註': 100,          // 辭典 8
+    '調查項目': 30,       // 辭典 17：「請輸入文字30字以內」
+    '環境現況描述': 200,  // 辭典 19：「輸入文字限200字以內」
+    '調查方法描述': 100,  // 辭典 26：「請輸入文字100字以內」
+  },
+};
+
+/**
+ * 座標。五份辭典的文字一字不差，所以五個類別共用一條。
+ *
+ * 辭典原文（採樣座標-經度 X）：
+ *   「請勿輸入度分秒(121°33′50.8″)
+ *     若前方（座標系統）欄位填代碼2，座標應為116~125之間的數值
+ *     若前方（座標系統）欄位填代碼3，座標應為6位數字」
+ *   （緯度 Y 對應 20~26 與 7 位數字）
+ *
+ * ⚠️ 「6位數字」就照字面驗：**純整數、正好 6 位**，不接受小數。
+ * 辭典自己給的範例也是 179159 / 2543818，都沒有小數點。
+ *
+ * v4.43 我一度放寬成「只看整數部分」，理由是使用者送出去而且被收下的
+ * 完成版_水質_115Q2 有 28 筆寫 176031.1 / 2593075.81。
+ * v4.44 改回照字面——**「以前被收下」不等於「以後會被收下」**，
+ * 官方系統最近才更新過。以官方寫的為準，這是使用者的裁示。
+ *
+ * 座標系統填 2（WGS84）則**沒有**位數規定，官方只寫了範圍（116~125／20~26），
+ * 範例本身就帶小數（120.309），所以那一邊不驗位數。
+ */
+function coordViolations(row, cat) {
+  const has = (k) => cat.fields.some((f) => f.key === k);
+  if (!has('座標系統') || !has('採樣座標-經度 X')) return [];
+  const sys = String(row['座標系統'] ?? '').trim();
+  const out = [];
+  const check = (key, label) => {
+    const raw = String(row[key] ?? '').trim();
+    if (raw === '') return; // 空白歸「必填欄位提醒」管，這裡不重複講
+    if (!/^-?\d+(\.\d+)?$/.test(raw)) {
+      // 實例：使用者的完成版_生態_115Q2 有 10 筆緯度寫成「22.653886,」——
+      // 尾巴多一個逗號。整份檔案送出去了都沒人發現。
+      out.push({ key, label, value: raw,
+        why: `「${label}」只能填數字（官方明文「請勿輸入度分秒」）。目前是「${raw}」——請檢查是不是多了逗號、單位或其他符號` });
+      return;
+    }
+    const n = parseFloat(raw);
+    const intDigits = raw.replace(/^-/, '').split('.')[0].length;
+    if (sys === '2') {
+      const [lo, hi] = key === '採樣座標-緯度 Y' ? [20, 26] : [116, 125];
+      // v4.52（#70，使用者 11/4：只提醒不自動改）：填 2 但數字像 TWD97（經度 6 位、緯度 7 位整數）
+      const twdLike = key === '採樣座標-緯度 Y' ? /^2\d{6}(\.\d+)?$/.test(raw) : /^[1-3]\d{5}(\.\d+)?$/.test(raw);
+      if (twdLike) {
+        out.push({ key, label, value: raw, group: '座標系統填 2（WGS84），但座標看起來是 TWD97——座標系統是否應填 3',
+          why: `座標系統填 2（WGS84），但「${label}」的 ${raw} 看起來是 TWD97 座標（經度 6 位、緯度 7 位數字）——請確認座標系統是不是應該填 3` });
+        return;
+      }
+      if (!(n >= lo && n <= hi)) {
+        out.push({ key, label, value: raw,
+          why: `座標系統填 2（WGS84）時，「${label}」應為 ${lo}~${hi} 之間的數值（目前是 ${raw}）` });
+      }
+    } else if (sys === '3') {
+      const want = key === '採樣座標-緯度 Y' ? 7 : 6;
+      // v4.52（#70）：填 3 但數字像經緯度度數（經度 116～125、緯度 20～26，帶小數）
+      const [dlo, dhi] = key === '採樣座標-緯度 Y' ? [20, 26] : [116, 125];
+      if (raw.includes('.') && n >= dlo && n <= dhi) {
+        out.push({ key, label, value: raw, group: '座標系統填 3（TWD97-TM2），但座標看起來是經緯度度數——座標系統是否應填 2',
+          why: `座標系統填 3（TWD97-TM2），但「${label}」的 ${raw} 看起來是經緯度度數（WGS84）——請確認座標系統是不是應該填 2` });
+        return;
+      }
+      const example = key === '採樣座標-緯度 Y' ? '2543818' : '179159';
+      if (new RegExp(`^\\d{${want}}$`).test(raw)) return; // 正好 want 位純整數，過
+      if (raw.includes('.')) {
+        // 最常見的一種：位數對，但後面多了小數。講清楚要怎麼改，不要只說「不合規」。
+        out.push({ key, label, value: raw, group: `座標系統填 3 時，「${label}」要 ${want} 位整數（不含小數），位數不對`,
+          why: `座標系統填 3（TWD97-TM2）時，官方規定「${label}」為 ${want} 位數字（辭典範例 ${example}），`
+            + `不含小數。目前是「${raw}」——請把小數點以下四捨五入`
+            + `${intDigits !== want ? `，而且整數部分只有 ${intDigits} 位、應為 ${want} 位` : `（改成 ${Math.round(n)}）`}` });
+      } else {
+        out.push({ key, label, value: raw, group: `座標系統填 3 時，「${label}」要 ${want} 位整數，位數不對`,
+          why: `座標系統填 3（TWD97-TM2）時，官方規定「${label}」為 ${want} 位數字（辭典範例 ${example}）。`
+            + `目前是「${raw}」，共 ${intDigits} 位` });
+      }
+    }
+  };
+  check('採樣座標-經度 X', '採樣座標-經度 X');
+  check('採樣座標-緯度 Y', '採樣座標-緯度 Y');
+  return out;
+}
+
+/** 字數上限。五個類別共用一支，欄位與數字從 MAX_CHARS 查。 */
+function charLimitViolations(row, cat) {
+  const limits = MAX_CHARS[cat.key] || {};
+  const out = [];
+  Object.entries(limits).forEach(([key, max]) => {
+    if (!cat.fields.some((f) => f.key === key)) return; // 這一類沒有這個欄位就跳過
+    const v = String(row[key] ?? '').trim();
+    if (v !== '' && charLen(v) > max) {
+      out.push({ key, label: key, value: v, group: `「${key}」超過 ${max} 字`,
+        why: `官方規定「${key}」限 ${max} 字以內，目前 ${charLen(v)} 字` });
+    }
+  });
+  return out;
+}
+
+/** 生態專屬的格式規則（辭典 20～22）。字數上限已移到 charLimitViolations。 */
+function ecoFormatViolations(row) {
+  const out = [];
+  // 辭典 20 學名：「請填寫生物學名。若出現中文，要擋住」
+  const sci = String(row['學名'] ?? '').trim();
+  if (sci !== '' && /[㐀-䶿一-鿿]/.test(sci)) {
+    out.push({ key: '學名', label: '學名', value: sci,
+      why: `官方規定「學名」不可出現中文（目前是「${sci}」）。中文名稱請填在「中文名」欄` });
+  }
+  // 辭典 21 中文名：「請填寫生物俗名。若出現英文，要擋住」
+  const cn = String(row['中文名'] ?? '').trim();
+  if (cn !== '' && /[A-Za-z]/.test(cn)) {
+    out.push({ key: '中文名', label: '中文名', value: cn,
+      why: `官方規定「中文名」不可出現英文（目前是「${cn}」）。學名請填在「學名」欄` });
+  }
+  // v4.67（#122）：「單位」填的是特有性（實例：別家交來的檔案整段把特有性填到單位欄、特有性欄空白）
+  const unit = String(row['單位'] ?? '').trim();
+  if (/^(臺灣|台灣)?(特有種|特有亞種|外來種|特有|特亞|外來)$/.test(unit)) {
+    out.push({ key: '單位', label: '單位', value: unit, group: '「單位」填的是特有性',
+      why: `「單位」填的是特有性（「${unit}」），應該填在「特有性」欄。單位是數量的單位，例如隻次、群、%` });
+  }
+  // 辭典 22 數量：「請填寫數字或"-"　請勿填寫級別或奇怪的符號，例如：@、#...」
+  const qty = String(row['數量'] ?? '').trim();
+  if (qty !== '' && qty !== '-' && !/^\d+(\.\d+)?$/.test(qty)) {
+    out.push({ key: '數量', label: '數量', value: qty,
+      why: `官方規定「數量」只能填數字或「-」，不可以填級別或符號（目前是「${qty}」）` });
+  }
+  return out;
+}
+
+/*
+ * 數值、比較關係、代碼的格式規則（v4.47，修正清單 #48、#49、#51）
+ * ─────────────────────────────────────────────────────────────
+ * 使用者的原則：**程式自己判讀的值不能填錯**；使用者自己在格子裡打的值，
+ * 用格子變色提醒就好。這一組就是「變色提醒」那一半——判讀出來的值本來就
+ * 符合（10 份化驗 Excel 實測 409 筆零異常），會被它標出來的只會是手動打的、
+ * 別家公司交來的、或報告寫法真的認不得而原樣帶進來的。
+ */
+const COMPARE_ALLOWED = new Set(['<', '>', 'ND', '＜', '＞']); // 辭典原文用全形「＞、＜」，說明會用半形，兩種都收
+const PLAIN_DECIMAL = /^[+-]?(\d+(\.\d+)?|\.\d+)$/;
+
+/**
+ * 判讀前把「不會猜錯」的寫法統一（v4.47 #49②，使用者同意）：
+ *   ≦ ≤ → <　　≧ ≥ → >　　千分位逗號 100,000 → 100000
+ * 只處理逗號真的落在千分位上的寫法（1,234 / 12,345.6），1,2 這種不動——那不是千分位。
+ */
+function normalizeValueSymbols(raw) {
+  let s = String(raw ?? '').trim().replace(/[≦≤]/g, '<').replace(/[≧≥]/g, '>');
+  const m = s.match(/^([<>＜＞]?\s*)(\d{1,3}(?:,\d{3})+(?:\.\d+)?)$/);
+  if (m) s = m[1] + m[2].replace(/,/g, '');
+  return s;
+}
+
+function valueAndCodeViolations(row, cat) {
+  const out = [];
+  const has = (k) => cat.fields.some((f) => f.key === k);
+  // #48 比較關係：辭典「含 ＞、＜、ND，共3種」
+  if (has('比較關係')) {
+    const c = String(row['比較關係'] ?? '').trim();
+    if (c !== '' && !COMPARE_ALLOWED.has(c)) {
+      out.push({ key: '比較關係', label: '比較關係', value: c,
+        why: `官方規定「比較關係」只能填 <、>、ND 三種（目前是「${c}」）。沒有數值的原因請寫在備註` });
+    }
+  }
+  // #49① 檢測數值／監測數值
+  const vf = has('檢測數值') ? '檢測數值' : has('監測數值') ? '監測數值' : null;
+  if (vf) {
+    const v = String(row[vf] ?? '').trim();
+    if (v !== '') {
+      if (/^[+-]?(\d+(\.\d+)?|\.\d+)\s*[(（][^()（）]*[)）]$/.test(v)) {
+        // v4.52（#71，使用者 11/4）：常見寫法是「<10(8)」；前面沒有 < 的「1(0.3)」不是常見格式，
+        // 不知道該取哪個數字，不自動改，請使用者確認
+        out.push({ key: vf, label: vf, value: v,
+          why: `「${vf}」帶括號，但前面沒有「<」（目前是「${v}」）。常見的寫法是「<10(8)」（申報 < 與 10）；這一格請對照報告確認數值後手動改，數值欄不可以有括號` });
+      } else if (!PLAIN_DECIMAL.test(v)) {
+        out.push({ key: vf, label: vf, value: v,
+          why: `「${vf}」只能填數字，不可以有符號、括號、單位或文字（目前是「${v}」）`
+            + (has('比較關係') ? `。「<0.1」請拆成比較關係「<」＋數值「0.1」；ND 請寫在比較關係、數值留空` : '') });
+      } else {
+        const n = Number(v);
+        if ((cat.key === 'air' || cat.key === 'geo') && !(n > 0)) {
+          out.push({ key: vf, label: vf, value: v,
+            why: `官方規定${cat.label}的「${vf}」要填大於 0 的數字（目前是「${v}」）` });
+        } else if (cat.key === 'water' && n === 0) {
+          out.push({ key: vf, label: vf, value: v,
+            why: `官方規定水質的「${vf}」勿輸入 0（正負皆可）（目前是「${v}」）。量不到請寫 ND，或留空並在備註寫原因` });
+        }
+      }
+    }
+  }
+  // #51 單位代碼：1～161
+  if (cat.unitField && typeof UNIT_CODES !== 'undefined') {
+    const u = String(row[cat.unitField] ?? '').trim();
+    if (u !== '' && !UNIT_CODES[u]) {
+      out.push({ key: cat.unitField, label: cat.unitField, value: u,
+        why: `「${cat.unitField}」要填單位代碼表裡的代碼 1～161（目前是「${u}」，代碼表裡沒有）` });
+    }
+  }
+  // #51 檢測機構許可證號：代碼表內的代碼或 AA，多個用半形分號
+  if (has('檢測機構許可證號') && typeof AGENCY_CODES !== 'undefined') {
+    const a = String(row['檢測機構許可證號'] ?? '').trim();
+    if (a !== '') {
+      const bad = a.split(';').map((x) => x.trim()).filter((x) => !AGENCY_CODES[x]);
+      if (bad.length) {
+        // v4.54（#91）：用了分號以外的符號、空白、重複或多餘的分號 → 講「分隔符號不對」，不要講成「代碼表裡沒有」
+        // v4.56（#94）：分號以外的任何符號（半形、全形）、「及」「和」「與」「跟」、空白、重複或多餘的分號
+        const full = /[^0-9A-Za-z;０-９Ａ-Ｚａ-ｚ\u3400-\u9fff]|及|和|與|跟|;;|^;|;$/.test(a);
+        const wide = /[０-９Ａ-Ｚａ-ｚ]/.test(a), lowerAA = /(^|;)\s*aa\s*(;|$)/i.test(a) && !/(^|;)\s*AA\s*(;|$)/.test(a);
+        out.push({ key: '檢測機構許可證號', label: '檢測機構許可證號', value: a,
+          why: (!full && wide) ? `機構代碼要用半形數字（目前是「${a}」）`
+            : (!full && lowerAA) ? `不在代碼表內的機構要填大寫「AA」（目前是「${a}」）`
+            : full
+            ? `多個機構代碼要用半形分號「;」分隔，例如 1;2，前後不要多打分號或空白（目前是「${a}」）`
+            : `「檢測機構許可證號」要填檢測機構代碼表裡的代碼，不在表內的機構填 AA 並在「其他檢測機構名稱」寫公司名稱（目前「${bad.filter(Boolean).join('、') || '空的分段'}」代碼表裡沒有）` });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 這一列有哪些格子不符合官方格式規定。
+ * 給表格紅框、滑鼠提示、匯出前清點共用。
+ */
+/*
+ * 日期、時間、起迄順序（v4.53，修正清單 #82～#84，使用者 11/4 裁示）
+ * ─────────────────────────────────────────────────────────────
+ * 官方規定日期填西元 yyyy/mm/dd、時間填 24 小時制 hh:mm（勿用分號、勿填 24:00）。
+ *   ・讀得懂但寫法不對的（民國 115/07/08、10時30分、08;30）→ 一鍵修正處理，這裡只抓分號
+ *   ・讀不懂的（「七月初」「上午」「連續24小時」）→ 這裡紅框，請使用者照報告手動改
+ *   ・迄早於起 → 這裡紅框（不知道是起還是迄寫錯，不自動改）
+ * 24:00 等超出 00:00～23:59 的值由表格的時間格與匯出前「時間超出範圍」那一道處理，這裡不重複。
+ */
+const DATE_FIELDS = ['日期(起)', '日期(迄)'];
+const TIME_FIELDS = ['時間(起)', '時間(迄)'];
+function dateTimeViolations(row, cat) {
+  if (typeof DateTimeUtil === 'undefined') return [];
+  const has = (k) => cat.fields.some((f) => f.key === k);
+  const out = [];
+  const isoOf = (k) => { const v = DateTimeUtil.toISODate(row[k]); return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : ''; };
+  const hmsOf = (k) => { const v = DateTimeUtil.toHMS(row[k]); return /^\d{2}:\d{2}:\d{2}$/.test(v) && !DateTimeUtil.outOfRangeTimeReason(v) ? v : ''; };
+  DATE_FIELDS.filter(has).forEach((k) => {
+    const raw = String(row[k] ?? '').trim();
+    if (raw !== '' && !isoOf(k)) {
+      out.push({ key: k, label: k, value: raw, group: '日期看不懂是哪一天（要填西元 yyyy/mm/dd）',
+        why: `「${k}」看不懂是哪一天（目前是「${raw}」）。官方規定日期填西元 yyyy/mm/dd，例如 2026/07/08，請對照報告修改` });
+    }
+  });
+  TIME_FIELDS.filter(has).forEach((k) => {
+    const raw = String(row[k] ?? '').trim();
+    if (raw === '') return;
+    if (/[;；]/.test(raw)) {
+      out.push({ key: k, label: k, value: raw, group: '時間用了分號（要寫 hh:mm）',
+        why: `「${k}」用了分號（目前是「${raw}」）。官方規定時間寫 24 小時制 hh:mm，勿用分號` });
+      return;
+    }
+    if (DateTimeUtil.outOfRangeTimeReason(raw) || DateTimeUtil.outOfRangeTimeReason(DateTimeUtil.toHMS(raw))) return;
+    if (!hmsOf(k)) {
+      out.push({ key: k, label: k, value: raw, group: '時間看不懂（要填 24 小時制 hh:mm）',
+        why: `「${k}」看不懂是幾點（目前是「${raw}」）。官方規定時間填 24 小時制 hh:mm，例如 08:30，請對照報告修改` });
+    }
+  });
+  if (has('日期(起)') && has('日期(迄)')) {
+    const ds = isoOf('日期(起)'), de = isoOf('日期(迄)');
+    if (ds && de && de < ds) {
+      out.push({ key: '日期(迄)', label: '日期(迄)', value: row['日期(迄)'], group: '迄（結束）日期早於起（開始）日期',
+        why: `日期(迄) ${de.replace(/-/g, '/')} 早於日期(起) ${ds.replace(/-/g, '/')}。請對照報告確認是哪一個寫錯` });
+    } else if (ds && de && ds === de && has('時間(起)') && has('時間(迄)')) {
+      const ts = hmsOf('時間(起)'), te = hmsOf('時間(迄)');
+      if (ts && te && te < ts) {
+        out.push({ key: '時間(迄)', label: '時間(迄)', value: row['時間(迄)'], group: '同一天裡，迄（結束）時間早於起（開始）時間',
+          why: `同一天（${ds.replace(/-/g, '/')}）的時間(迄) ${te.slice(0, 5)} 早於時間(起) ${ts.slice(0, 5)}。請確認是時間寫錯，還是日期(迄)應該是隔天` });
+      }
+    }
+  }
+  return out;
+}
+
+function fieldFormatViolations(row, cat) {
+  if (!cat) return [];
+  const out = coordViolations(row, cat);
+  out.push(...dateTimeViolations(row, cat));
+  out.push(...charLimitViolations(row, cat));
+  if (cat.key === 'eco') out.push(...ecoFormatViolations(row));
+  out.push(...valueAndCodeViolations(row, cat));
+  return out;
+}
+
+/** 一列裡所有「值填了但不對」的格子——格式規則 ＋ 噪音振動連動規則。 */
+function allRuleViolations(row, cat) {
+  return [...noiseVibRuleViolations(row, cat), ...fieldFormatViolations(row, cat)];
+}
+
+/** 這一列有沒有任何需要修正的地方（含必填未填）——給「只看需要修正的」篩選用。 */
+function rowNeedsFix(row, cat) {
+  return missingRequiredFields(row, cat).length > 0 || allRuleViolations(row, cat).length > 0;
+}
+
+/**
+ * 「監測點基本資料」頁缺了哪些官方必填欄位。
+ *
+ * 兩種必填：
+ *   ・永遠必填（required）：計畫代碼、書件名稱、執行現況
+ *   ・條件式必填（requiredWhenStatus）：施工／竣工／營運日期，看執行現況選了什麼
+ *
+ * 給基本資料頁的橘框與匯出前的提醒共用——同一份判斷，不寫兩遍。
+ */
+/**
+ * 「監測點基本資料」頁填了但格式要確認的欄位（v4.52，修正清單 #78）。
+ * 計畫代碼舊版三碼（E-001）：官方要四碼流水號（E-0001），但補一個 0 是不是正確代碼
+ * 要使用者自己確認，所以只提醒、不自動改（使用者 11/4 裁示）。
+ */
+function basicInfoFormatWarnings(info) {
+  const out = [];
+  const code = String((info || {})['計畫代碼'] ?? '').trim();
+  if (/^[A-Za-z]+-\d{3}(\.\d+)?$/.test(code)) {
+    out.push({ key: '計畫代碼', label: '計畫代碼',
+      why: `提醒：「${code}」是舊版三碼格式，官方說明寫「英文代碼-四碼流水號」（例如 E-0001）。請到環評書件系統確認正確的計畫代碼；確認無誤的話不改也可以匯出` });
+  }
+  return out;
+}
+
+function missingBasicInfoFields(info) {
+  const status = String((info || {})['執行現況'] ?? '').trim();
+  const blank = (k) => String((info || {})[k] ?? '').trim() === '';
+  const out = [];
+  BASIC_INFO_FIELDS.forEach((f) => {
+    if (!blank(f.key)) return;
+    if (f.required) { out.push({ key: f.key, label: f.label, why: '官方必填' }); return; }
+    if (Array.isArray(f.requiredWhenStatus) && status !== '' && f.requiredWhenStatus.includes(status)) {
+      out.push({ key: f.key, label: f.label, why: `執行現況是「${status}」時必填` });
+    }
+  });
+  return out;
+}
+
+function missingRequiredFields(row, cat) {
+  const blank = (k) => String(row[k] ?? '').trim() === '';
+  const out = [];
+  const noteFilled = !blank('備註');
+  /*
+   * ⚠️ 比較關係填 ND 的時候，檢測數值本來就不用填。
+   *
+   * 辭典（水質 25／空品 27／地質 24）原文：
+   *   「請填入數字…（**如果比較關係填ND，無需填寫數值**）」
+   *
+   * 舊版沒有這個例外，於是每一列 ND 都被標成「檢測數值必填」。
+   * 實測使用者送出去、而且被收下的 完成版_水質_115Q2：239 列裡
+   * **58 列 ND 全部被誤報**——一個每季固定跳 58 次的假警報，
+   * 真正該修的東西就淹沒在裡面。
+   */
+  const isND = String(row['比較關係'] ?? '').trim().toUpperCase() === 'ND';
+  const valueField = cat.fields.find((f) => f.key === '檢測數值' || f.key === '監測數值');
+  cat.fields.forEach((f) => {
+    if (!blank(f.key)) return;
+    if (f.required) out.push({ key: f.key, label: f.label, why: '必填' });
+    else if (f.requiredUnlessNote && !noteFilled) {
+      if (isND && valueField && f.key === valueField.key) return; // ND 不用填數值
+      out.push({ key: f.key, label: f.label, why: '必填（若確實無法檢測，請在備註說明原因）' });
+    }
+  });
+  /*
+   * 「未檢測」一定要寫進備註。
+   *
+   * 辭典（空品 32／水質 30／地質 29／噪音 30／生態 29）原文一字不差：
+   *   「若檢測數值輸入未輸入數值，則該欄位為必填，需填寫檢測數值未填的原因」
+   *
+   * 所以：數值空白、而且不是 ND（ND 是「測了，低於偵測極限」，不是沒測）
+   * → 備註變成必填。使用者自己的完成版就是這樣寫的（唯一一筆沒有數值的列，
+   * 備註寫著「未檢測」），官方範例則寫「無水可採」「因設備故障，未有數值」。
+   */
+  if (valueField && blank(valueField.key) && !isND && blank('備註')
+      && cat.fields.some((f) => f.key === '備註')) {
+    out.push({ key: '備註', label: '備註',
+      why: `必填（「${valueField.label}」沒有數值時，官方規定要在備註寫出原因，例如「未檢測」「無水可採」「因設備故障，未有數值」）` });
+  }
+  // 條件式必填
+  const unitField = cat.unitField;
+  if (unitField && String(row[unitField] ?? '').trim() === '160') {
+    const other = cat.fields.find((f) => /^其他.*單位$/.test(f.key));
+    if (other && blank(other.key))
+      out.push({ key: other.key, label: other.label, why: '單位代碼填 160 時必填' });
+  }
+  if (String(row['檢測機構許可證號'] ?? '').trim().split(';').some((x) => x.trim() === 'AA')
+      && blank('其他檢測機構名稱')) {
+    out.push({ key: '其他檢測機構名稱', label: '其他檢測機構名稱', why: '許可證號填 AA 時必填' });
+  }
+  /*
+   * 生態辭典 29（備註）：「若檢測數值輸入未輸入數值，則該欄位為必填，
+   * 需填寫檢測數值未填的原因」。生態的「檢測數值」就是「數量」，
+   * 而辭典 22 說沒有數字的時候填「-」——所以填了「-」＝沒有數值，備註就必填。
+   */
+  /*
+   * v4.47（#50）：辭典 噪音-19 備註「依據噪音管制法第15條第3項時，環境音量標準為必填」。
+   * 判讀報告時程式不會自動填這個管制標準，所以只會發生在使用者手動選的時候。
+   */
+  if (cat.key === 'noise' && String(row['管制標準'] ?? '').trim() === '噪音管制法第15條第3項' && blank('環境音量標準')) {
+    out.push({ key: '環境音量標準', label: '環境音量標準', why: '必填（管制標準選「噪音管制法第15條第3項」時，官方規定環境音量標準為必填）' });
+  }
+  if (cat.key === 'eco' && String(row['數量'] ?? '').trim() === '-' && blank('備註')) {
+    out.push({ key: '備註', label: '備註', why: '「數量」填「-」時必填，請說明沒有數值的原因' });
+  }
+  return out;
+}
+
+/** 這一格是不是「該填而沒填」——給表格畫紅框用。 */
+function isMissingRequiredCell(row, cat, fieldKey) {
+  return missingRequiredFields(row, cat).some((m) => m.key === fieldKey);
+}
