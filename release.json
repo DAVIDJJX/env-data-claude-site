@@ -1,13 +1,13 @@
 {
-  "version": "v0.1",
+  "version": "v0.1.1",
   "source_repo": "DAVIDJJX/env-data-claude",
-  "source_commit": "46e18ce143ad9bdcf59629b4374c382213865f62",
-  "reviewed_commit": "b1fef525fb47f288cda24c1d69fa3ee93bebfe74",
-  "pr": 1,
+  "source_commit": "16836fbb687eddd0947552ac21f4e0b5add76901",
+  "reviewed_commit": "cc156217a85d301b6a80b8714b081065e4fdaf4d",
+  "pr": 2,
   "published_files": {
     ".nojekyll": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "addon/edc-addon.js": "df4a62bd6dbd5b8bc2e4f7f7f47db7e9d2583faaac75260c8c340b6bb63b25b7",
+    "addon/edc-addon.js": "9d6c89e0c698db73a3ad177dbe4b650f9a1d9e0e428d415c9b5e256c23681b70",
     "index.html": "b896d76c4e99d8b4296c8db33c8e6490033dfddf7fe6d8d2052793d6a07fc484",
-    "version.json": "89b1493cc590f6e7954cab5a08313c0322b4fe7f10009ccfb0a6e1eef4693387"
+    "version.json": "56248d725772549492bddee5f2005500c2f3e59ff37b73914c87a743e3089afd"
   }
 }
