@@ -19461,17 +19461,17 @@ function ya(e) {
 }
 //#endregion
 //#region src/xdw/decode.ts
-var ba = 100, xa = "pdfjs/pdf.worker.min.js", Sa = "pdfjs/";
-Er.workerSrc = new URL(xa, import.meta.url).href;
-function Ca() {
-	return new URL(Sa, import.meta.url).href;
+var ba = 100, xa = (e) => va(e).pages.length, Sa = "pdfjs/pdf.worker.min.js", Ca = "pdfjs/";
+Er.workerSrc = new URL(Sa, import.meta.url).href;
+function wa() {
+	return new URL(Ca, import.meta.url).href;
 }
-async function wa(e) {
+async function Ta(e) {
 	let t = va(e);
 	if (t.pages.length > 100) throw Error("這個 XDW 超過 100 頁，請分拆後再上傳。");
 	let n = t.pages.filter((e) => e.kind === "fax"), r = n.length ? zr({
 		data: ya(n),
-		wasmUrl: Ca()
+		wasmUrl: wa()
 	}) : void 0, i;
 	try {
 		i = r ? await r.promise : void 0;
@@ -19526,4 +19526,4 @@ async function wa(e) {
 	};
 }
 //#endregion
-export { ba as MAX_PAGES, wa as decodeXdw, Ca as pdfjsWasmUrl };
+export { ba as MAX_PAGES, xa as countXdwPages, Ta as decodeXdw, wa as pdfjsWasmUrl };
